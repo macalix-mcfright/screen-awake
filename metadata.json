@@ -1,0 +1,5 @@
+{
+  "name": "Screen Awake",
+  "description": "A simple web utility to prevent your screen from sleeping or dimming. Ideal for watching long videos, presentations, or any activity where you need the screen to stay on.",
+  "requestFramePermissions": []
+}
