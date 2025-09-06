@@ -1,23 +1,16 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 
-const parseYouTubeUrl = (url: string): { type: 'video' | 'playlist'; id: string } | null => {
-  // Prioritize playlist URLs, as they can also contain a video ID.
-  const playlistRegex = /[?&]list=([^#&?]+)/;
-  const playlistMatch = url.match(playlistRegex);
-  if (playlistMatch && playlistMatch[1]) {
-    return { type: 'playlist', id: playlistMatch[1] };
-  }
-
-  // Fallback to checking for a video ID.
+const parseYouTubeVideoUrl = (url: string): string | null => {
+  // Regex to find a video ID from various YouTube URL formats.
   const videoRegex = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
   const videoMatch = url.match(videoRegex);
   if (videoMatch && videoMatch[1]) {
-    return { type: 'video', id: videoMatch[1] };
+    return videoMatch[1];
   }
-
   return null;
 };
+
 
 const getDefaultShutdownTime = (): string => {
   const now = new Date();
@@ -33,6 +26,7 @@ const getDefaultShutdownTime = (): string => {
 };
 
 type PlaybackState = 'idle' | 'playing' | 'finished';
+type PlaylistItem = { id: string; url: string };
 
 interface YouTubeSchedulerProps {
   acquireLock: () => void;
@@ -41,7 +35,7 @@ interface YouTubeSchedulerProps {
 
 export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock, releaseLock }) => {
   const [url, setUrl] = useState('');
-  const [content, setContent] = useState<{ type: 'video' | 'playlist'; id: string } | null>(null);
+  const [playlist, setPlaylist] = useState<PlaylistItem[]>([]);
   const [shutdownTime, setShutdownTime] = useState<string>(getDefaultShutdownTime());
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
@@ -49,67 +43,65 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
   const [loop, setLoop] = useState(false);
   const timerRef = useRef<number | null>(null);
   const playerRef = useRef<any | null>(null); // To hold the YT.Player instance
+  const [currentlyPlayingIndex, setCurrentlyPlayingIndex] = useState<number | null>(null);
 
   useEffect(() => {
     // This effect manages the YouTube player instance.
-    // It creates a player when starting and destroys it when stopping.
-    if (playbackState === 'playing' && content) {
+    if (playbackState === 'playing' && playlist.length > 0) {
       const createPlayer = () => {
         const playerConfig: any = {
           playerVars: {
             autoplay: 1,
             controls: 1,
-            modestbranding: 1, // Cleaner look
-            rel: 0, // Don't show related videos at the end
+            modestbranding: 1,
+            rel: 0,
           },
           events: {
+            'onReady': (event: any) => {
+                if (playlist.length > 1) {
+                  const videoIds = playlist.map(video => video.id);
+                  event.target.loadPlaylist(videoIds);
+                  if (loop) {
+                      event.target.setLoop(true);
+                  }
+                } else {
+                   event.target.loadVideoById(playlist[0].id);
+                }
+            },
             'onStateChange': (event: any) => {
               // @ts-ignore
-              if (event.data === window.YT.PlayerState.PLAYING && timerRef.current) {
-                // Update status when video starts playing successfully
-                const shutdownDate = new Date(shutdownTime);
-                const formattedTime = shutdownDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                setStatusMessage(`Timer set. Playback will stop at ${formattedTime}.`);
+              if (event.data === window.YT.PlayerState.PLAYING) {
+                if (timerRef.current) { // Check if timer is active
+                    const shutdownDate = new Date(shutdownTime);
+                    const formattedTime = shutdownDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    setStatusMessage(`Timer set. Playback will stop at ${formattedTime}.`);
+                }
+                const newIndex = playlist.length > 1 ? event.target.getPlaylistIndex() : 0;
+                setCurrentlyPlayingIndex(newIndex);
               }
             },
             'onError': (event: any) => {
               const errorCode = event.data;
-              // Error codes for unplayable videos: invalid param, html5 error, not found/private, not embeddable.
               const unplayableErrorCodes = [2, 5, 100, 101, 150];
-              if (unplayableErrorCodes.includes(errorCode) && content?.type === 'playlist') {
+              if (unplayableErrorCodes.includes(errorCode)) {
                 setStatusMessage('An unplayable video was skipped.');
-                // event.target is the player instance.
-                event.target.nextVideo();
+                if (playlist.length > 1) {
+                    event.target.nextVideo();
+                }
               }
             }
           }
         };
-        
-        if (loop) {
-            playerConfig.playerVars.loop = 1;
-        }
-
-        if (content.type === 'video') {
-            playerConfig.videoId = content.id;
-            if (loop) {
-                // For a single video to loop, the 'playlist' param must also be set to the video ID.
-                playerConfig.playerVars.playlist = content.id;
-            }
-        } else { // 'playlist'
-            playerConfig.playerVars.listType = 'playlist';
-            playerConfig.playerVars.list = content.id;
-        }
 
         // @ts-ignore - YT is loaded from the script tag in index.html
         playerRef.current = new window.YT.Player('youtube-player-container', playerConfig);
       };
 
-      // Ensure the YouTube IFrame API is ready before creating the player.
+      // Ensure the YouTube IFrame API is ready.
       // @ts-ignore
       if (window.YT && window.YT.Player) {
         createPlayer();
       } else {
-        // If the API isn't ready, the global onYouTubeIframeAPIReady function will be called once it is.
         // @ts-ignore
         window.onYouTubeIframeAPIReady = createPlayer;
       }
@@ -122,7 +114,7 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
         playerRef.current = null;
       }
     };
-  }, [playbackState, content, loop, shutdownTime]);
+  }, [playbackState, playlist, loop, shutdownTime]);
 
   useEffect(() => {
     // Cleanup timer on component unmount
@@ -133,20 +125,33 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
     };
   }, []);
 
-  const handleSchedule = (e: React.FormEvent) => {
+  const handleAddVideo = (e: React.FormEvent) => {
     e.preventDefault();
+    const videoId = parseYouTubeVideoUrl(url);
+    if (!videoId) {
+        setStatusMessage('Invalid YouTube video URL.');
+        return;
+    }
+    if (playlist.some(v => v.id === videoId)) {
+        setStatusMessage('This video is already in the playlist.');
+        return;
+    }
+    setPlaylist(prev => [...prev, { id: videoId, url: url }]);
+    setUrl('');
+    setStatusMessage('Video added to playlist.');
+  };
+
+  const handleRemoveVideo = (idToRemove: string) => {
+    setPlaylist(prev => prev.filter(video => video.id !== idToRemove));
+  };
+
+  const handleSchedule = () => {
+    if (playlist.length === 0) {
+      setStatusMessage('Please add at least one video.');
+      return;
+    }
     if (timerRef.current) {
       clearTimeout(timerRef.current);
-    }
-    // Setting state to idle ensures the old player is destroyed by the useEffect cleanup
-    setPlaybackState('idle'); 
-    releaseLock();
-
-    const parsedContent = parseYouTubeUrl(url);
-    if (!parsedContent) {
-      setStatusMessage('Invalid YouTube URL. Please use a valid video or playlist URL.');
-      setContent(null);
-      return;
     }
 
     const shutdownDate = new Date(shutdownTime);
@@ -154,31 +159,23 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
 
     if (shutdownDate <= now) {
       setStatusMessage('Scheduled time must be in the future.');
-      setContent(null);
       return;
     }
     
-    setContent(parsedContent);
-    setPlaybackState('playing'); // This will trigger the useEffect to create a new player
+    setPlaybackState('playing');
     acquireLock();
 
     setStatusMessage('Loading player and starting timer...');
     const delay = shutdownDate.getTime() - now.getTime();
     
     timerRef.current = window.setTimeout(() => {
-      setPlaybackState('finished'); // Triggers player cleanup
+      setPlaybackState('finished');
       releaseLock();
 
       const formattedTime = new Date(shutdownTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       if (autoClose) {
-        // Wait for the next event loop tick to ensure React has processed state changes
         setTimeout(() => {
-            // First, attempt to close the window.
             window.close();
-
-            // If window.close() fails (due to browser security), the script continues.
-            // We replace the entire page content with a "safe to close" message
-            // to avoid a blank white screen and provide a better UX.
             document.body.innerHTML = `
               <div style="background-color: #0f172a; color: #cbd5e1; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; text-align: center; padding: 2rem;">
                 <h1 style="font-size: 2.25rem; font-weight: bold; color: #f8fafc; margin-bottom: 1rem;">All Done!</h1>
@@ -197,7 +194,6 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
     if (timerRef.current) {
       clearTimeout(timerRef.current);
     }
-    // Changing state to 'idle' triggers the useEffect cleanup, stopping the video.
     setPlaybackState('idle');
     setStatusMessage('Playback and timer canceled.');
     releaseLock();
@@ -209,7 +205,8 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
     }
     setPlaybackState('idle');
     setUrl('');
-    setContent(null);
+    setPlaylist([]);
+    setCurrentlyPlayingIndex(null);
     setStatusMessage(null);
     setShutdownTime(getDefaultShutdownTime());
     setAutoClose(false);
@@ -220,12 +217,45 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
   const renderContent = () => {
     switch (playbackState) {
       case 'playing':
+        const isPlaylist = playlist.length > 1;
+        const isRadioMode = playlist.length === 1;
+
         return (
           <div className="w-full space-y-4">
-            <div className="aspect-video w-full bg-black rounded-lg overflow-hidden">
-              {/* This div is the container where the YouTube player will be injected */}
-              <div id="youtube-player-container" className="w-full h-full"></div>
+            <div className={`w-full ${isPlaylist ? 'flex flex-col md:flex-row gap-4' : ''}`}>
+              <div className={`aspect-video bg-black rounded-lg overflow-hidden ${isPlaylist ? 'flex-grow w-full md:w-2/3' : 'w-full'}`}>
+                <div id="youtube-player-container" className="w-full h-full"></div>
+              </div>
+
+              {isPlaylist && (
+                <div className="w-full md:w-1/3 bg-slate-900/50 rounded-lg p-3 border border-slate-700">
+                  <h3 className="text-lg font-bold text-slate-100 mb-2">Playlist</h3>
+                  <ul className="space-y-2 max-h-64 md:max-h-80 overflow-y-auto pr-2">
+                    {playlist.map((video, index) => (
+                      <li key={video.id}>
+                        <button
+                          onClick={() => playerRef.current?.playVideoAt(index)}
+                          className={`w-full text-left p-2 rounded-md transition-colors ${currentlyPlayingIndex === index ? 'bg-amber-500 text-slate-900' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}`}
+                          title={video.url}
+                        >
+                          <span className="font-semibold block truncate">
+                            {`Track ${index + 1}`}
+                          </span>
+                          <span className="text-xs block truncate opacity-70">{video.url}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
+
+            {isRadioMode && (
+              <p className="text-sm text-slate-400 -mt-2">
+                Radio mode is active. Related videos will play automatically.
+              </p>
+            )}
+
             <button
               onClick={handleCancel}
               className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-full transition-all duration-300 ease-in-out"
@@ -254,19 +284,47 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
       case 'idle':
       default:
         return (
-          <form onSubmit={handleSchedule} className="w-full space-y-4">
-            <div>
-              <label htmlFor="youtube-url" className="block text-sm font-medium text-slate-300 mb-1 text-left">YouTube Video or Playlist URL</label>
-              <input
-                type="url"
-                id="youtube-url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=... or /playlist?list=..."
-                required
-                className="w-full bg-slate-700 text-white rounded-md px-3 py-2 border border-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400"
-              />
-            </div>
+          <div className="w-full space-y-4">
+            <form onSubmit={handleAddVideo} className="w-full">
+                <label htmlFor="youtube-url" className="block text-sm font-medium text-slate-300 mb-1 text-left">Add YouTube Video URL</label>
+                <div className="flex gap-2">
+                    <input
+                        type="url"
+                        id="youtube-url"
+                        value={url}
+                        onChange={(e) => setUrl(e.target.value)}
+                        placeholder="https://www.youtube.com/watch?v=..."
+                        required
+                        className="flex-grow bg-slate-700 text-white rounded-md px-3 py-2 border border-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
+                    <button type="submit" className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-4 rounded-md transition-colors">
+                        Add
+                    </button>
+                </div>
+            </form>
+
+            {playlist.length > 0 && (
+                <div className="w-full text-left p-4 bg-slate-900/50 rounded-lg border border-slate-700">
+                    <h3 className="font-bold text-slate-200 mb-2">Current Playlist ({playlist.length})</h3>
+                    <ul className="space-y-2 max-h-48 overflow-y-auto pr-2">
+                      {playlist.map((video, index) => (
+                        <li key={video.id} className="flex items-center justify-between bg-slate-700 p-2 rounded-md">
+                          <span className="text-slate-300 text-sm truncate flex-grow mr-2" title={video.url}>
+                            {`${index + 1}. ${video.url}`}
+                          </span>
+                          <button
+                            onClick={() => handleRemoveVideo(video.id)}
+                            className="text-red-400 hover:text-red-300 font-bold text-xl ml-2 px-2 flex-shrink-0"
+                            aria-label={`Remove ${video.url} from playlist`}
+                          >
+                            &times;
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                </div>
+            )}
+
             <div>
               <label htmlFor="shutdown-time" className="block text-sm font-medium text-slate-300 mb-1 text-left">Stop Playback At</label>
               <input
@@ -293,9 +351,9 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
                   </div>
                   <div className="ml-3 text-sm leading-6">
                       <label htmlFor="loop-playback" className="font-medium text-slate-300">
-                          Loop Playback
+                          Loop Playlist
                       </label>
-                      <p id="loop-playback-description" className="text-slate-500">Continuously replay the video or playlist.</p>
+                      <p id="loop-playback-description" className="text-slate-500">Continuously replay the entire playlist.</p>
                   </div>
               </div>
               <div className="relative flex items-start">
@@ -321,22 +379,24 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
               </div>
             </div>
             <button
-              type="submit"
-              className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 px-4 rounded-full transition-all duration-300 ease-in-out transform hover:scale-105"
+              type="button"
+              onClick={handleSchedule}
+              disabled={playlist.length === 0}
+              className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 px-4 rounded-full transition-all duration-300 ease-in-out transform hover:scale-105 disabled:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed disabled:transform-none"
             >
-              Load & Start Timer
+              Load Playlist & Start Timer
             </button>
-          </form>
+          </div>
         );
     }
   };
 
   return (
-    <div className="w-full max-w-md mx-auto bg-slate-800 rounded-2xl shadow-2xl p-8 text-center flex flex-col items-center border border-slate-700">
+    <div className="w-full max-w-3xl mx-auto bg-slate-800 rounded-2xl shadow-2xl p-6 md:p-8 text-center flex flex-col items-center border border-slate-700">
       <header className="w-full mb-4">
         <h2 className="text-2xl font-bold text-slate-100">YouTube Shutdown Timer</h2>
         <p className="text-sm text-slate-400 mt-1 h-10">
-          Play a video or playlist and set a time for it to automatically stop. Perfect for presentations.
+          Build a playlist or start a radio session, and set a time for it to automatically stop.
         </p>
       </header>
       

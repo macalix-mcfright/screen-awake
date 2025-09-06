@@ -11,7 +11,7 @@ const App: React.FC = () => {
 
   return (
     <main className="bg-slate-900 text-white min-h-screen flex flex-col items-center justify-center p-4 font-sans antialiased">
-      <div className="w-full max-w-md mx-auto space-y-8">
+      <div className="w-full max-w-3xl mx-auto space-y-8">
         <div className="bg-slate-800 rounded-2xl shadow-2xl p-8 text-center flex flex-col items-center border border-slate-700">
           <header className="mb-6">
             <CoffeeIcon className="h-16 w-16 mx-auto text-amber-400" />
