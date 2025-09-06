@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 export const useWakeLock = () => {
@@ -26,15 +25,11 @@ export const useWakeLock = () => {
       setError(null); // Clear previous errors on success
     } catch (err) {
       userIntentRef.current = false; // If request fails, intent can't be fulfilled.
-      
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error(`Wake Lock Error: ${err}`);
       if (err instanceof DOMException && err.name === 'NotAllowedError') {
-        // This is a common permission issue in some environments, not an unexpected application error.
-        // We handle it gracefully by informing the user in the UI instead of logging a console error.
-        setError('Wake Lock permission was denied by the browser. The app will still function, but your screen may turn off. This can happen if the feature is disabled by a permissions policy.');
+        setError('Access to the Screen Wake Lock feature was denied. This is likely due to a browser permissions policy, which can occur when the app is running in an iframe (like an online editor) or if the feature is disabled in your browser settings.');
       } else {
-        // For other, truly unexpected errors, we log them to the console for debugging.
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        console.error(`Wake Lock Error: ${err}`);
         setError(`An unexpected error occurred: ${errorMessage}`);
       }
       setIsActive(false);

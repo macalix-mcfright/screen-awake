@@ -53,12 +53,10 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
         const videoIds = playlist.map(video => video.id);
         const firstVideoId = videoIds[0];
 
-        // --- REFINED PLAYBACK LOGIC ---
         // Determine the playback mode based on user settings
         const isUserPlaylist = playlist.length > 1 && !radioMode;
         const isSingleLooping = playlist.length === 1 && loop;
-        const isRadio = radioMode && playlist.length > 0;
-        const isSingleNoLoop = playlist.length === 1 && !loop && !radioMode;
+        const isRadioOrSingleNoLoop = (playlist.length === 1 && !loop) || radioMode;
 
         // Base configuration for all player instances
         const basePlayerConfig: any = {
@@ -91,11 +89,15 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
               const errorCode = event.data;
               // 2: invalid parameter, 5: HTML5 player error, 100: video not found, 101/150: embedding disabled
               const unplayableErrorCodes = [2, 5, 100, 101, 150];
-               // Auto-skip unplayable videos in any mode that has a next video.
-              const shouldAutoSkip = isUserPlaylist || isRadio;
+              const shouldAutoSkip = isUserPlaylist || isRadioOrSingleNoLoop;
 
+              // Auto-skip unplayable videos in any playlist-based mode (user playlist or radio).
+              // We do not skip for single looping videos to avoid an infinite error loop.
               if (shouldAutoSkip && unplayableErrorCodes.includes(errorCode)) {
                 setStatusMessage('Unplayable video detected, skipping to next...');
+                
+                // Calling nextVideo() tells the player to advance in its current list.
+                // This works for both user-defined playlists and YouTube's "RD" radio mixes.
                 event.target.nextVideo();
               }
             }
@@ -106,31 +108,34 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
 
         if (isUserPlaylist) {
           // --- MODE: USER PLAYLIST ---
-          finalPlayerConfig.playerVars.rel = 0;
+          // Play a specific list of videos, then stop (or loop).
+          finalPlayerConfig.playerVars.rel = 0; // Prevent related videos after the playlist ends.
           finalPlayerConfig.events.onReady = (event: any) => {
             event.target.cuePlaylist(videoIds);
             if (loop) {
-              event.target.setLoop(true);
+              event.target.setLoop(true); // Loop the entire playlist
             }
             event.target.playVideoAt(0);
           };
         } else if (isSingleLooping) {
           // --- MODE: SINGLE LOOPING VIDEO ---
+          // The specific combo of parameters to loop a single video.
           finalPlayerConfig.videoId = firstVideoId;
           finalPlayerConfig.playerVars.loop = 1;
           finalPlayerConfig.playerVars.playlist = firstVideoId; // Required for single video loop
-          finalPlayerConfig.events.onReady = (event: any) => event.target.playVideo();
-        } else if (isRadio) {
+          finalPlayerConfig.events.onReady = (event: any) => {
+            event.target.playVideo();
+          };
+        } else if (isRadioOrSingleNoLoop) {
           // --- MODE: RADIO / CONTINUOUS PLAY ---
+          // This is the definitive fix for continuous play.
+          // We use YouTube's auto-generated "Mix" playlist.
           finalPlayerConfig.playerVars.listType = 'playlist';
           finalPlayerConfig.playerVars.list = 'RD' + firstVideoId;
-          finalPlayerConfig.events.onReady = (event: any) => event.target.playVideo();
-        } else if (isSingleNoLoop) {
-          // --- MODE: SINGLE VIDEO (NO LOOP/RADIO) ---
-          // This is the direct playback method that fixes issues with long videos.
-          finalPlayerConfig.videoId = firstVideoId;
-          finalPlayerConfig.playerVars.rel = 0; // Prevent related videos after it ends.
-          finalPlayerConfig.events.onReady = (event: any) => event.target.playVideo();
+          finalPlayerConfig.events.onReady = (event: any) => {
+            // The list is loaded by playerVars, so we just need to start playback.
+            event.target.playVideo();
+          };
         }
 
         // @ts-ignore - YT is loaded from the script tag in index.html
@@ -185,17 +190,18 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
     setPlaylist(prev => prev.filter(video => video.id !== idToRemove));
   };
 
-  const handleSchedule = (playlistForAction?: PlaylistItem[]) => {
-    const currentPlaylist = playlistForAction || playlist;
-    if (currentPlaylist.length === 0) {
-      setStatusMessage('Please add at least one video or enter a URL to play now.');
+  const handleSchedule = () => {
+    if (playlist.length === 0) {
+      setStatusMessage('Please add at least one video.');
       return;
     }
     if (timerRef.current) {
       clearTimeout(timerRef.current);
     }
 
+    // FIX: Corrected 'date' to 'Date'
     const shutdownDate = new Date(shutdownTime);
+    // FIX: Corrected 'date' to 'Date'
     const now = new Date();
 
     if (shutdownDate <= now) {
@@ -229,24 +235,6 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
         setStatusMessage(`Scheduled time reached. Playback stopped at ${formattedTime}.`);
       }
     }, delay);
-  };
-  
-  const handlePlayNow = () => {
-    const videoId = parseYouTubeVideoUrl(url);
-    if (!videoId) {
-        setStatusMessage('Invalid YouTube video URL.');
-        return;
-    }
-
-    const singleVideoPlaylist = [{ id: videoId, url: url }];
-    // Set state to configure for single video playback
-    setPlaylist(singleVideoPlaylist);
-    setLoop(false);
-    setRadioMode(false);
-    setUrl('');
-    
-    // Call handleSchedule with the temporary playlist to bypass async state issues.
-    handleSchedule(singleVideoPlaylist);
   };
 
   const handleCancel = () => {
@@ -356,15 +344,6 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
                         required
                         className="flex-grow bg-slate-700 text-white rounded-md px-3 py-2 border border-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-400"
                     />
-                     <button
-                        type="button"
-                        onClick={handlePlayNow}
-                        disabled={!url.trim()}
-                        className="bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-2 px-4 rounded-md transition-colors disabled:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed"
-                        aria-label="Play video now"
-                      >
-                          Play
-                      </button>
                     <button type="submit" className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-4 rounded-md transition-colors">
                         Add
                     </button>
@@ -473,11 +452,11 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
             </div>
             <button
               type="button"
-              onClick={() => handleSchedule()}
+              onClick={handleSchedule}
               disabled={playlist.length === 0}
               className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 px-4 rounded-full transition-all duration-300 ease-in-out transform hover:scale-105 disabled:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed disabled:transform-none"
             >
-              Start Timer
+              Load Playlist & Start Timer
             </button>
           </div>
         );

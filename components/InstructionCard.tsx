@@ -1,3 +1,4 @@
+
 import React from 'react';
 
 interface InstructionCardProps {
@@ -17,7 +18,7 @@ export const InstructionCard: React.FC<InstructionCardProps> = ({ isSupported, e
       <h3 className="font-bold text-slate-200 mb-2">How it works:</h3>
       <ul className="list-disc list-inside space-y-2">
         <li>The screen lock will activate automatically when you start playing a video in the YouTube timer below.</li>
-        <li>This is perfect for watching long videos, reading recipes, or giving presentations in any app or tab.</li>
+        <li>This is perfect for keeping your screen on during long videos, music playlists, video calls, or while following a recipe.</li>
         <li>The lock is automatically released if you stop the video, navigate away, or close this page.</li>
         {!error && (
           isSupported ? (
