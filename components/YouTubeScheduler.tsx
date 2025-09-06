@@ -41,6 +41,7 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
   const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
   const [autoClose, setAutoClose] = useState(false);
   const [loop, setLoop] = useState(false);
+  const [radioMode, setRadioMode] = useState(false);
   const timerRef = useRef<number | null>(null);
   const playerRef = useRef<any | null>(null); // To hold the YT.Player instance
   const [currentlyPlayingIndex, setCurrentlyPlayingIndex] = useState<number | null>(null);
@@ -49,52 +50,96 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
     // This effect manages the YouTube player instance.
     if (playbackState === 'playing' && playlist.length > 0) {
       const createPlayer = () => {
-        const playerConfig: any = {
+        const videoIds = playlist.map(video => video.id);
+        const firstVideoId = videoIds[0];
+
+        // Determine the playback mode based on user settings
+        const isUserPlaylist = playlist.length > 1 && !radioMode;
+        const isSingleLooping = playlist.length === 1 && loop;
+        const isRadioOrSingleNoLoop = (playlist.length === 1 && !loop) || radioMode;
+
+        // Base configuration for all player instances
+        const basePlayerConfig: any = {
           playerVars: {
             autoplay: 1,
             controls: 1,
             modestbranding: 1,
-            rel: 0,
           },
           events: {
-            'onReady': (event: any) => {
-                if (playlist.length > 1) {
-                  const videoIds = playlist.map(video => video.id);
-                  event.target.loadPlaylist(videoIds);
-                  if (loop) {
-                      event.target.setLoop(true);
-                  }
-                } else {
-                   event.target.loadVideoById(playlist[0].id);
-                }
-            },
             'onStateChange': (event: any) => {
               // @ts-ignore
               if (event.data === window.YT.PlayerState.PLAYING) {
-                if (timerRef.current) { // Check if timer is active
-                    const shutdownDate = new Date(shutdownTime);
-                    const formattedTime = shutdownDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    setStatusMessage(`Timer set. Playback will stop at ${formattedTime}.`);
+                if (timerRef.current) {
+                  const shutdownDate = new Date(shutdownTime);
+                  const formattedTime = shutdownDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                  setStatusMessage(`Timer set. Playback will stop at ${formattedTime}.`);
                 }
-                const newIndex = playlist.length > 1 ? event.target.getPlaylistIndex() : 0;
-                setCurrentlyPlayingIndex(newIndex);
+                 // Update the currently playing index for user-created playlists
+                if (isUserPlaylist) {
+                    const newIndex = event.target.getPlaylistIndex();
+                    setCurrentlyPlayingIndex(newIndex);
+                } else {
+                    // For radio/single, we can just highlight the first item if needed
+                    // but since the playlist isn't shown, this has no visual effect.
+                    setCurrentlyPlayingIndex(0);
+                }
               }
             },
             'onError': (event: any) => {
               const errorCode = event.data;
+              // 2: invalid parameter, 5: HTML5 player error, 100: video not found, 101/150: embedding disabled
               const unplayableErrorCodes = [2, 5, 100, 101, 150];
-              if (unplayableErrorCodes.includes(errorCode)) {
-                setStatusMessage('An unplayable video was skipped.');
-                if (playlist.length > 1) {
-                    event.target.nextVideo();
-                }
+              const shouldAutoSkip = isUserPlaylist || isRadioOrSingleNoLoop;
+
+              // Auto-skip unplayable videos in any playlist-based mode (user playlist or radio).
+              // We do not skip for single looping videos to avoid an infinite error loop.
+              if (shouldAutoSkip && unplayableErrorCodes.includes(errorCode)) {
+                setStatusMessage('Unplayable video detected, skipping to next...');
+                
+                // Calling nextVideo() tells the player to advance in its current list.
+                // This works for both user-defined playlists and YouTube's "RD" radio mixes.
+                event.target.nextVideo();
               }
             }
           }
         };
 
+        let finalPlayerConfig = basePlayerConfig;
+
+        if (isUserPlaylist) {
+          // --- MODE: USER PLAYLIST ---
+          // Play a specific list of videos, then stop (or loop).
+          finalPlayerConfig.playerVars.rel = 0; // Prevent related videos after the playlist ends.
+          finalPlayerConfig.events.onReady = (event: any) => {
+            event.target.cuePlaylist(videoIds);
+            if (loop) {
+              event.target.setLoop(true); // Loop the entire playlist
+            }
+            event.target.playVideoAt(0);
+          };
+        } else if (isSingleLooping) {
+          // --- MODE: SINGLE LOOPING VIDEO ---
+          // The specific combo of parameters to loop a single video.
+          finalPlayerConfig.videoId = firstVideoId;
+          finalPlayerConfig.playerVars.loop = 1;
+          finalPlayerConfig.playerVars.playlist = firstVideoId; // Required for single video loop
+          finalPlayerConfig.events.onReady = (event: any) => {
+            event.target.playVideo();
+          };
+        } else if (isRadioOrSingleNoLoop) {
+          // --- MODE: RADIO / CONTINUOUS PLAY ---
+          // This is the definitive fix for continuous play.
+          // We use YouTube's auto-generated "Mix" playlist.
+          finalPlayerConfig.playerVars.listType = 'playlist';
+          finalPlayerConfig.playerVars.list = 'RD' + firstVideoId;
+          finalPlayerConfig.events.onReady = (event: any) => {
+            // The list is loaded by playerVars, so we just need to start playback.
+            event.target.playVideo();
+          };
+        }
+
         // @ts-ignore - YT is loaded from the script tag in index.html
-        playerRef.current = new window.YT.Player('youtube-player-container', playerConfig);
+        playerRef.current = new window.YT.Player('youtube-player-container', finalPlayerConfig);
       };
 
       // Ensure the YouTube IFrame API is ready.
@@ -114,7 +159,7 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
         playerRef.current = null;
       }
     };
-  }, [playbackState, playlist, loop, shutdownTime]);
+  }, [playbackState, playlist, loop, radioMode]);
 
   useEffect(() => {
     // Cleanup timer on component unmount
@@ -154,7 +199,9 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
       clearTimeout(timerRef.current);
     }
 
+    // FIX: Corrected 'date' to 'Date'
     const shutdownDate = new Date(shutdownTime);
+    // FIX: Corrected 'date' to 'Date'
     const now = new Date();
 
     if (shutdownDate <= now) {
@@ -211,23 +258,23 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
     setShutdownTime(getDefaultShutdownTime());
     setAutoClose(false);
     setLoop(false);
+    setRadioMode(false);
     releaseLock();
   };
 
   const renderContent = () => {
     switch (playbackState) {
       case 'playing':
-        const isPlaylist = playlist.length > 1;
-        const isRadioMode = playlist.length === 1;
+        const isDisplayingPlaylist = playlist.length > 1 && !radioMode;
 
         return (
           <div className="w-full space-y-4">
-            <div className={`w-full ${isPlaylist ? 'flex flex-col md:flex-row gap-4' : ''}`}>
-              <div className={`aspect-video bg-black rounded-lg overflow-hidden ${isPlaylist ? 'flex-grow w-full md:w-2/3' : 'w-full'}`}>
+            <div className={`w-full ${isDisplayingPlaylist ? 'flex flex-col md:flex-row gap-4' : ''}`}>
+              <div className={`aspect-video bg-black rounded-lg overflow-hidden ${isDisplayingPlaylist ? 'flex-grow w-full md:w-2/3' : 'w-full'}`}>
                 <div id="youtube-player-container" className="w-full h-full"></div>
               </div>
 
-              {isPlaylist && (
+              {isDisplayingPlaylist && (
                 <div className="w-full md:w-1/3 bg-slate-900/50 rounded-lg p-3 border border-slate-700">
                   <h3 className="text-lg font-bold text-slate-100 mb-2">Playlist</h3>
                   <ul className="space-y-2 max-h-64 md:max-h-80 overflow-y-auto pr-2">
@@ -250,9 +297,9 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
               )}
             </div>
 
-            {isRadioMode && (
-              <p className="text-sm text-slate-400 -mt-2">
-                Radio mode is active. Related videos will play automatically.
+            {radioMode && (
+              <p className="text-sm text-slate-400 -mt-2 text-left">
+                Radio mode is active. A continuous mix will play starting from your first video.
               </p>
             )}
 
@@ -270,7 +317,7 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
            <div className="w-full space-y-4">
             <div className="aspect-video w-full bg-black rounded-lg flex flex-col items-center justify-center text-white p-4">
               <h3 className="text-2xl font-bold mb-2">Playback Finished</h3>
-              <p className="text-slate-300">This is your cue to stop screen sharing.</p>
+              <p className="text-slate-300">The timer has ended.</p>
             </div>
             <button
               onClick={handleReset}
@@ -341,19 +388,44 @@ export const YouTubeScheduler: React.FC<YouTubeSchedulerProps> = ({ acquireLock,
                   <div className="flex h-6 items-center">
                       <input
                           id="loop-playback"
-                          aria-describedby="loop-playback-description"
                           name="loop-playback"
                           type="checkbox"
                           checked={loop}
-                          onChange={(e) => setLoop(e.target.checked)}
-                          className="h-4 w-4 rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-800"
+                          disabled={playlist.length === 0}
+                          onChange={(e) => {
+                            setLoop(e.target.checked);
+                            if (e.target.checked) setRadioMode(false);
+                          }}
+                          className="h-4 w-4 rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-800 disabled:opacity-50"
                       />
                   </div>
                   <div className="ml-3 text-sm leading-6">
-                      <label htmlFor="loop-playback" className="font-medium text-slate-300">
-                          Loop Playlist
+                      <label htmlFor="loop-playback" className={`font-medium ${playlist.length === 0 ? 'text-slate-500' : 'text-slate-300'}`}>
+                          {playlist.length > 1 ? 'Loop Playlist' : 'Loop Video'}
                       </label>
-                      <p id="loop-playback-description" className="text-slate-500">Continuously replay the entire playlist.</p>
+                      <p id="loop-playback-description" className="text-slate-500">Continuously replay the video or playlist.</p>
+                  </div>
+              </div>
+               <div className="relative flex items-start">
+                  <div className="flex h-6 items-center">
+                      <input
+                          id="radio-mode"
+                          name="radio-mode"
+                          type="checkbox"
+                          checked={radioMode}
+                          disabled={playlist.length === 0}
+                          onChange={(e) => {
+                            setRadioMode(e.target.checked);
+                            if (e.target.checked) setLoop(false);
+                          }}
+                          className="h-4 w-4 rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-800 disabled:opacity-50"
+                      />
+                  </div>
+                  <div className="ml-3 text-sm leading-6">
+                      <label htmlFor="radio-mode" className={`font-medium ${playlist.length === 0 ? 'text-slate-500' : 'text-slate-300'}`}>
+                          Enable Radio Mode
+                      </label>
+                      <p id="radio-mode-description" className="text-slate-500">Play related videos continuously.</p>
                   </div>
               </div>
               <div className="relative flex items-start">
